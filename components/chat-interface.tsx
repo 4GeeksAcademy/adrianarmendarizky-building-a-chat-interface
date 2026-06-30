@@ -1,54 +1,90 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { MessageSquare } from "lucide-react"
 import { MessageList } from "@/components/message-list"
 import { ChatInput } from "@/components/chat-input"
 import { TokenSidebar } from "@/components/token-sidebar"
-import { estimateTokens, generateReply, type ChatMessage } from "@/lib/chat"
+import { fetchGroqReply } from "@/lib/groq"
+import type { ChatMessage, TokenUsage } from "@/lib/chat"
+
+const EMPTY_USAGE: TokenUsage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+}
+
+const STORAGE_KEY = "chat-history"
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isThinking, setIsThinking] = useState(false)
+  const [usage, setUsage] = useState<TokenUsage>(EMPTY_USAGE)
+  const [error, setError] = useState<string | null>(null)
+  const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null)
 
-  const usage = useMemo(() => {
-    let promptTokens = 0
-    let completionTokens = 0
-    for (const message of messages) {
-      const tokens = estimateTokens(message.content)
-      if (message.role === "user") promptTokens += tokens
-      else completionTokens += tokens
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved) {
+      try {
+        setMessages(JSON.parse(saved))
+      } catch {
+        localStorage.removeItem(STORAGE_KEY)
+      }
     }
-    return {
-      promptTokens,
-      completionTokens,
-      totalTokens: promptTokens + completionTokens,
-    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
   }, [messages])
 
-  const handleSend = useCallback((text: string) => {
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: text,
-    }
-    setMessages((prev) => [...prev, userMessage])
-    setIsThinking(true)
-
-    window.setTimeout(() => {
-      const reply: ChatMessage = {
+  const handleSend = useCallback(
+    async (text: string) => {
+      const userMessage: ChatMessage = {
         id: crypto.randomUUID(),
-        role: "assistant",
-        content: generateReply(text),
+        role: "user",
+        content: text,
       }
-      setMessages((prev) => [...prev, reply])
-      setIsThinking(false)
-    }, 900)
-  }, [])
+
+      const updatedHistory = [...messages, userMessage]
+      setMessages(updatedHistory)
+      setIsThinking(true)
+      setError(null)
+
+      try {
+        const reply = await fetchGroqReply(updatedHistory)
+
+        const assistantMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: reply.content,
+        }
+
+        setMessages((prev) => [...prev, assistantMessage])
+        setUsage((prev) => ({
+          promptTokens: prev.promptTokens + reply.usage.promptTokens,
+          completionTokens: prev.completionTokens + reply.usage.completionTokens,
+          totalTokens: prev.totalTokens + reply.usage.totalTokens,
+        }))
+
+        const seconds = reply.responseTimeMs / 1000
+        setTokensPerSecond(reply.usage.completionTokens / seconds)
+      } catch (err) {
+        setError("Something went wrong talking to the AI. Please try again.")
+      } finally {
+        setIsThinking(false)
+      }
+    },
+    [messages],
+  )
 
   const handleClear = useCallback(() => {
     setMessages([])
+    setUsage(EMPTY_USAGE)
+    setError(null)
     setIsThinking(false)
+    setTokensPerSecond(null)
+    localStorage.removeItem(STORAGE_KEY)
   }, [])
 
   return (
@@ -62,6 +98,7 @@ export function ChatInterface() {
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
           <div className="mx-auto h-full w-full max-w-2xl">
             <MessageList messages={messages} isThinking={isThinking} />
+            {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
           </div>
         </div>
 
@@ -70,7 +107,12 @@ export function ChatInterface() {
         </div>
       </section>
 
-      <TokenSidebar usage={usage} messageCount={messages.length} onClear={handleClear} />
+      <TokenSidebar
+        usage={usage}
+        messageCount={messages.length}
+        onClear={handleClear}
+        tokensPerSecond={tokensPerSecond}
+      />
     </main>
   )
 }
